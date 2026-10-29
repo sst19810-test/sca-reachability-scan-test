@@ -28,6 +28,48 @@ The Path examples directly invoke `new NioPathDeserializer().deserialize(parser,
 
 This is method-reachability demonstration, not verification or reproduction of the CVE claims in the attachment. It selects four methods rather than covering every entry. Jackson 3 `tools.jackson.*` methods are excluded because the supplied dependency is Jackson 2. Tests check observable behavior for both layouts; they do not instrument library method entry or attempt resource exhaustion, arbitrary class loading, or stale-buffer disclosure.
 
+## Intentional SAST vulnerabilities
+
+`demo.sast` holds deliberately vulnerable first-party code for testing static analyzers. It uses the same two layouts: `single` keeps every source and sink in one servlet, and `cross` passes request data from `AdminController` through `AdminService` to a sink in a third file. The code is compile-only: the servlet API is a `provided` dependency, nothing deploys it, and neither `Main` nor the tests call it. Never deploy or copy it.
+
+Every flow starts at an `HttpServletRequest` parameter, body, or cookie. "Detected by" is a one-time snapshot from CodeQL `java-security-extended` (`codeql/java-queries` 1.11.4) and Semgrep registry rules `p/java`, `p/owasp-top-ten`, and `p/secrets`.
+
+| CWE | Single file (`VulnerableServlet`) | Detected by |
+|---|---|---|
+| 798 Hardcoded credentials | `DB_PASSWORD` used in `findUser` | Semgrep |
+| 321 Hardcoded crypto key | `COOKIE_KEY` used in `encrypt` | Semgrep |
+| 89 SQL injection | `findUser`: `name` concatenated into `executeQuery` | Both |
+| 79 Reflected XSS | `greet`: `name` written into HTML | Both |
+| 78 Command injection | `ping`: `host` passed to `sh -c` | Both |
+| 22 Path traversal | `download`: `file` resolved under the upload directory | Both |
+| 918 SSRF | `fetch`: `url` opened with `URL.openStream` | Both |
+| 601 Open redirect | `redirect`: `next` passed to `sendRedirect` | Both |
+| 90 LDAP injection | `directory`: `uid` concatenated into the search filter | Both |
+| 117 Log injection | `login`: `user` written to the log | Both |
+| 328 Weak password hash | `login`: unsalted MD5 | Both |
+| 330 Insecure randomness | `login`: `java.util.Random` session token | CodeQL |
+| 614 / 1004 Insecure cookie | `login`: cookies without Secure or HttpOnly | Both |
+| 327 Broken cipher | `encrypt`: `DES/ECB` | Both |
+| 611 XXE | `importXml`: default `DocumentBuilderFactory` | CodeQL |
+| 502 Unsafe deserialization | `restoreSession`: `ObjectInputStream` on the request body | Both |
+| 502 Unsafe deserialization | `readEvent`: Jackson `enableDefaultTyping` | Both |
+| 209 Stack trace exposure | `doGet` / `doPost`: `printStackTrace(resp.getWriter())` | Both |
+
+| CWE | Cross file (`AdminController` → `AdminService` → sink) | Detected by |
+|---|---|---|
+| 798 Hardcoded credentials | `AccountRepository` connection constants | Semgrep |
+| 89 SQL injection | `/accounts?owner` → `accountsPage` → `AccountRepository.findByOwner` | Both |
+| 79 Reflected XSS | `/accounts?owner` echoed by `accountsPage` into the response | Both |
+| 78 Command injection | `/backup?target` → `backup` → `ShellRunner.run` | CodeQL |
+| 22 Path traversal (file write) | `POST /notes` `name` → `saveNote` → `DocumentStore.write` | CodeQL |
+| 611 XXE | `POST /import` body → `importCatalog` → `XmlImporter.text` (SAX) | CodeQL |
+| 918 SSRF | `/preview?url` → `preview` → `HttpFetcher.get` | CodeQL |
+| 295 Trust-all TLS | `HttpFetcher.trustAll` | Both |
+| 297 Hostname verification disabled | `HttpFetcher.get` | CodeQL |
+| 502 Unsafe deserialization | `prefs` cookie → `preferences` → `SessionCodec.decode` | CodeQL |
+
+Scanners also report some extra findings that aren't in these tables, such as relative-path `sh` execution and command output reflected into the response.
+
 ## Files
 
 - `src/main/java/demo/Main.java`: runs either or both layouts.
@@ -37,6 +79,8 @@ This is method-reachability demonstration, not verification or reproduction of t
 - `src/main/java/demo/cross/Event.java`: separately declared polymorphic model.
 - `src/main/java/demo/cross/BufferGateway.java`: PostgreSQL call site.
 - `src/test/java/demo/ExamplesTest.java`: behavior checks for both layouts.
+- `src/main/java/demo/sast/single/VulnerableServlet.java`: all single-file SAST vulnerabilities.
+- `src/main/java/demo/sast/cross/`: `AdminController` (sources), `AdminService` (pass-through), and sink classes `AccountRepository`, `ShellRunner`, `DocumentStore`, `XmlImporter`, `HttpFetcher`, `SessionCodec`.
 
 For manual runtime confirmation, set method breakpoints on the selected library methods in your IDE, attach Maven dependency sources, and run `demo.Main`.
 
